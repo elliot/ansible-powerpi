@@ -1,0 +1,96 @@
+---
+- name: Configure Power Pi's
+  sudo: yes
+  hosts: power-pi
+  tasks:
+
+    - name: Install system dependencies
+      apt: name="{{ item }}" state=present force=yes update_cache=yes
+      with_items: 
+        - apcupsd
+        - git
+        - nagios-nrpe-server
+        - unionfs-fuse
+        - vim
+
+    - name: Set system hostname
+      hostname: name={{ inventory_hostname_short }}
+
+    - name: Set system hostname (/etc/hostname)
+      copy: content="{{inventory_hostname_short}}{{'\n'}}" dest=/etc/hostname mode=0644 owner=root group=root
+
+    - name: Update IPv4 hostname (/etc/hosts)
+      lineinfile:
+        dest: /etc/hosts
+        regexp: "^127.0.0.1"
+        line: "127.0.0.1{{'\t'}}{{inventory_hostname}}{% if inventory_hostname != inventory_hostname_short %}{{'\t'}}{{inventory_hostname_short}}{% endif %}{{'\t'}}localhost"
+        state: present
+
+    - name: Update IPv6 hostname (/etc/hosts)
+      lineinfile:
+        dest: /etc/hosts
+        regexp: "^::1"
+        line: "::1{{'\t\t'}}{{inventory_hostname}}{% if inventory_hostname != inventory_hostname_short %}{{'\t'}}{{inventory_hostname_short}}{% endif %}{{'\t'}}localhost ip6-localhost ip6-loopback"
+        state: present
+
+    - name: Expand root filesystem 
+      shell: /usr/bin/raspi-config --expand-rootfs
+
+    - name: Create UnionFS mount script
+      copy: src=files/mount_unionfs dest=/usr/local/bin/mount_unionfs owner=root group=root mode=0744 
+
+    - name: Configure mount points
+      copy: src=files/fstab dest=/etc/fstab owner=root group=root mode=0644 
+
+    - name: Check if swap enabled
+      shell: swapon -s | wc -l
+      register: swap_enabled
+
+    - name: Disable swap
+      shell: "{{ item }}"
+      with_items: 
+        - dphys-swapfile swapoff
+        - dphys-swapfile uninstall
+        - update-rc.d dphys-swapfile disable
+      when: swap_enabled.stdout != "1"
+
+    - name: Install elliot/nagios-check_apcupsd
+      git: src=https://github.com/elliot/nagios-check_apcupsd.git dest=/etc/nagios-plugins/check_apcupsd
+
+    - name: Install NRPE plugins 
+      copy: src=files/apcupsd.conf dest=/etc/nagios/nrpe.d/apcupsd.cfg 
+
+    - name: Update IPv6 hostname (/etc/hosts)
+      lineinfile:
+        dest: /etc/hosts
+        regexp: "^::1"
+        line: "::1{{'\t\t'}}{{inventory_hostname}}{% if inventory_hostname != inventory_hostname_short %}{{'\t'}}{{inventory_hostname_short}}{% endif %}{{'\t'}}localhost ip6-localhost ip6-loopback"
+        state: present
+
+    - name: Override APCUPSd default shutdown actions
+      copy: content="exit 99;" dest="{{ item }}" owner=root group=root mode=0744
+      with_items: 
+        - /etc/apcupsd/doreboot
+        - /etc/apcupsd/doshutdown
+
+    - name: Prepare directory structure - /etc
+      shell: "{{ item }}"
+      with_items: 
+        - cp -al /etc /etc_org
+        - mkdir /etc_rw
+
+    - name: Prepare directory structure - /var
+      shell: "{{ item }}"
+      with_items: 
+        - mv /var /var_org
+        - mkdir /var /var_rw
+
+    - name: Restart Raspberry Pi
+      command: shutdown -r now
+      async: 0
+      poll: 0
+      ignore_errors: true
+
+    - name: Wait for reboot
+      local_action: wait_for host={{ ansible_eth0.ipv4.address }} state=started
+      sudo: false
